@@ -8,10 +8,15 @@ import OptimizerPanel from './components/OptimizerPanel';
 import SavedLineups from './components/SavedLineups';
 import OwnershipModal from './components/OwnershipModal';
 import Toast from './components/Toast';
-import { useLocalStorage } from './hooks/useLocalStorage';
 import { usePlayers } from './hooks/usePlayers';
 import { usePersistedPlayers } from './hooks/usePersistedPlayers';
 import { SLOT_DEF, SHOWDOWN_SLOT_DEF, CONTEST_MODES } from './utils/constants';
+import {
+  getLineups,
+  saveLineup as saveLineupApi,
+  updateLineup as updateLineupApi,
+  deleteLineup as deleteLineupApi
+} from './api/lineups';
 import { normalizePlayers } from './utils/csvParser';
 import { 
   parsePastedOwnership, 
@@ -24,6 +29,11 @@ import { placePlayer, removeSlot, validateLineup } from './utils/lineupValidator
 function emptySlotsForMode(mode) {
   const slotDef = mode === CONTEST_MODES.SHOWDOWN ? SHOWDOWN_SLOT_DEF : SLOT_DEF;
   return Array(slotDef.length).fill(null);
+}
+
+function getErrorMessage(error, fallback) {
+  if (error?.message) return `${fallback}: ${error.message}`;
+  return fallback;
 }
 
 export default function App() {
@@ -42,7 +52,7 @@ export default function App() {
   const [title, setTitle] = useState("");
   const [toastMessage, setToastMessage] = useState("");
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [savedLineups, setSavedLineups] = useLocalStorage("dfs_saved", []);
+  const [savedLineups, setSavedLineups] = useState([]);
   const [editingLineupIndex, setEditingLineupIndex] = useState(null);
 
   const filteredPlayers = usePlayers(allPlayers, lineupSlots, posFilter, searchText, contestMode);
@@ -61,6 +71,40 @@ export default function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Only run once on mount
+
+  useEffect(() => {
+    let active = true;
+
+    const loadLineups = async () => {
+      try {
+        const lineups = await getLineups();
+        if (!active) return;
+        const normalized = (lineups || []).map(l => {
+          const lineupData = l.lineupData || {};
+          return {
+            id: l.id,
+            title: l.title,
+            contestMode: (l.contestMode || CONTEST_MODES.CLASSIC).toLowerCase(),
+            totalSalary: l.totalSalary,
+            players: lineupData.players || [],
+            slots: lineupData.slots || [],
+            createdAt: l.createdAt
+          };
+        });
+        setSavedLineups(normalized);
+      } catch (error) {
+        console.error('Failed to load lineups:', error);
+        showToast(getErrorMessage(error, 'Failed to load saved lineups from backend'));
+      }
+    };
+
+    loadLineups();
+
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleSalaryFileChange = (e) => {
     const file = e.target.files[0];
@@ -152,7 +196,7 @@ export default function App() {
     setLineupSlots(newSlots);
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     const v = validateLineup(lineupSlots, contestMode);
     if (!v.ok) return;
 
@@ -166,18 +210,40 @@ export default function App() {
         slot ? { player: slot.player, isCaptain: Boolean(slot.isCaptain) } : null
       )
     };
+    const payload = {
+      title: newLineup.title,
+      contestMode: contestMode.toUpperCase(),
+      totalSalary: newLineup.totalSalary,
+      lineupData: {
+        players: newLineup.players,
+        slots: newLineup.slots
+      }
+    };
 
-    if (editingLineupIndex !== null) {
-      // Update existing lineup
-      const updated = [...savedLineups];
-      updated[editingLineupIndex] = newLineup;
-      setSavedLineups(updated);
+    try {
+      const existing = editingLineupIndex !== null ? savedLineups[editingLineupIndex] : null;
+      const saved = (existing?.id != null)
+        ? await updateLineupApi(existing.id, payload)
+        : await saveLineupApi(payload);
+
+      const savedUiLineup = {
+        ...newLineup,
+        id: saved.id,
+        createdAt: saved.createdAt
+      };
+
+      if (editingLineupIndex !== null) {
+        const next = [...savedLineups];
+        next[editingLineupIndex] = savedUiLineup;
+        setSavedLineups(next);
+      } else {
+        setSavedLineups([savedUiLineup, ...savedLineups]);
+      }
       setEditingLineupIndex(null);
-      showToast("Lineup updated");
-    } else {
-      // Create new lineup
-      setSavedLineups([newLineup, ...savedLineups]);
-      showToast("Lineup saved");
+      showToast(editingLineupIndex !== null ? "Lineup updated" : "Lineup saved");
+    } catch (error) {
+      console.error('Failed to save lineup:', error);
+      showToast(getErrorMessage(error, 'Failed to save lineup to backend'));
     }
   };
 
@@ -187,35 +253,57 @@ export default function App() {
     setEditingLineupIndex(null);
   };
 
-  const handleReset = () => {
+  const handleReset = async () => {
     if (!confirm("Clear players, lineup, and saved list?")) return;
-    
-    clearPlayers();
-    setLineupSlots(emptySlotsForMode(contestMode));
-    setTitle("");
-    setSearchText("");
-    setPosFilter("ALL");
-    setSavedLineups([]);
-    showToast("All data cleared");
+
+    try {
+      await Promise.all(
+        savedLineups
+          .filter(lineup => Boolean(lineup.id))
+          .map(lineup => deleteLineupApi(lineup.id, lineup.contestMode))
+      );
+
+      clearPlayers();
+      setLineupSlots(emptySlotsForMode(contestMode));
+      setTitle("");
+      setSearchText("");
+      setPosFilter("ALL");
+      setSavedLineups([]);
+      showToast("All data cleared");
+    } catch (error) {
+      console.error('Failed to reset all data:', error);
+      showToast(getErrorMessage(error, 'Failed to fully clear backend lineups'));
+    }
   };
 
-  const handleDeleteLineup = (idx) => {
+  const handleDeleteLineup = async (idx) => {
     if (!window.confirm("Are you sure you want to delete this lineup? This action cannot be undone.")) {
       return;
     }
-    
-    const updated = [...savedLineups];
-    updated.splice(idx, 1);
-    setSavedLineups(updated);
-    // If we were editing this lineup, clear the editor
-    if (editingLineupIndex === idx) {
-      setEditingLineupIndex(null);
-      handleClear();
-    } else if (editingLineupIndex !== null && editingLineupIndex > idx) {
-      // Adjust the editing index if a lineup before it was deleted
-      setEditingLineupIndex(editingLineupIndex - 1);
+
+    try {
+      const lineup = savedLineups[idx];
+      if (lineup?.id) {
+        await deleteLineupApi(lineup.id, lineup.contestMode);
+      }
+
+      const updated = [...savedLineups];
+      updated.splice(idx, 1);
+      setSavedLineups(updated);
+
+      // If we were editing this lineup, clear the editor
+      if (editingLineupIndex === idx) {
+        setEditingLineupIndex(null);
+        handleClear();
+      } else if (editingLineupIndex !== null && editingLineupIndex > idx) {
+        // Adjust the editing index if a lineup before it was deleted
+        setEditingLineupIndex(editingLineupIndex - 1);
+      }
+      showToast("Lineup deleted");
+    } catch (error) {
+      console.error('Failed to delete lineup:', error);
+      showToast(getErrorMessage(error, 'Failed to delete lineup from backend'));
     }
-    showToast("Lineup deleted");
   };
 
   const handleEditLineup = (idx) => {
