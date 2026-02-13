@@ -49,3 +49,51 @@ npm run build
 - Vite
 - Tailwind CSS
 - PapaParse (CSV parsing)
+
+## Backend (Kotlin + Spring Boot)
+
+The repository includes a backend scaffold in `backend/` with:
+- Spring Boot + Kotlin
+- PostgreSQL
+- Flyway migrations
+
+### Security setup (required for local run)
+
+Create local env files before running backend:
+
+```bash
+cp backend/.env.example backend/.env
+cp .env.example .env.local
+```
+
+Then update `backend/.env` with your own `POSTGRES_PASSWORD` and `DB_PASSWORD`.
+
+### Start PostgreSQL (Docker)
+
+```bash
+cd backend
+docker compose up -d
+```
+
+### Run backend
+
+```bash
+cd backend
+./gradlew bootRun
+```
+
+Backend defaults:
+- API: `http://localhost:8080`
+- Health: `GET /api/health`
+
+Environment overrides:
+- `DB_URL`
+- `DB_USERNAME`
+- `DB_PASSWORD`
+- `APP_CORS_ORIGIN`
+
+## Security Notes
+
+- Do not commit `.env`, `.env.local`, or any credential files.
+- This repository intentionally avoids hardcoded DB credentials in application config.
+- For production: add authentication/authorization to backend endpoints before exposure.
